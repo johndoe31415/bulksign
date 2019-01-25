@@ -3,7 +3,8 @@ Hello there!
 I've checked your identity at a keysigning party and signed your GPG public
 key as a followup. Note that I will not upload your public key to any
 keyserver and each UID that you've associated with that public key is sent out
-in individual mails to each of the addresses.
+in individual mails to each of the addresses. Your signed public key is
+attached to this email.
 
 /-----\___________________.
 |  O  |__/^\__/^\_/^\___ /

@@ -37,7 +37,7 @@ from FriendlyArgumentParser import FriendlyArgumentParser
 def to_fingerprint(text):
 	fingerprint = bytes.fromhex(text)
 	if len(fingerprint) != 20:
-		raise Exception("Invaliding signing fingerprint. Was %d bytes long, needs to be 20 bytes." % (len(fingerprint)))
+		raise Exception("Invalid fingerprint specified. Was %d bytes long, needs to be 20 bytes." % (len(fingerprint)))
 	return fingerprint.hex()
 
 

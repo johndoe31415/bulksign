@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+#	bulksign - Key signing party utility that outputs mbox file
+#	Copyright (C) 2019-2019 Johannes Bauer
+#
+#	This file is part of bulksign.
+#
+#	bulksign is free software; you can redistribute it and/or modify
+#	it under the terms of the GNU General Public License as published by
+#	the Free Software Foundation; this program is ONLY licensed under
+#	version 3 of the License, later versions are explicitly excluded.
+#
+#	bulksign is distributed in the hope that it will be useful,
+#	but WITHOUT ANY WARRANTY; without even the implied warranty of
+#	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#	GNU General Public License for more details.
+#
+#	You should have received a copy of the GNU General Public License
+#	along with bulksign; if not, write to the Free Software
+#	Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
+#	Johannes Bauer <JohannesBauer@gmx.de>
+
+import sys
+import subprocess
+import re
+import collections
+import pwd
+import os
+import datetime
+import mako.lookup
+import email.utils
+from email.message import EmailMessage
+from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
+from FriendlyArgumentParser import FriendlyArgumentParser
+
+def to_fingerprint(text):
+	fingerprint = bytes.fromhex(text)
+	if len(fingerprint) != 20:
+		raise Exception("Invaliding signing fingerprint. Was %d bytes long, needs to be 20 bytes." % (len(fingerprint)))
+	return fingerprint.hex()
+
+
+parser = FriendlyArgumentParser()
+parser.add_argument("--oneshot", action = "store_true", help = "Break after the first signature. Useful for debugging.")
+parser.add_argument("-a", "--from-address", metavar = "email", type = str, required = True, help = "Email address to fill in as the 'from' address.")
+parser.add_argument("-n", "--signer-name", metavar = "realname", type = str, help = "Signer name. If not specified, take from getpwnam().")
+parser.add_argument("-c", "--cert-level", metavar = "lvl", type = int, default = 0, help = "Specify the certification level from 0 to 3.")
+parser.add_argument("-f", "--force", action = "store_true", help = "Do not ask for confirmation.")
+parser.add_argument("-o", "--outfile", metavar = "filename", type = str, default = "outbox.mbox", help = "Output filename. Defaults to %(default)s.")
+parser.add_argument("-v", "--verbose", action = "store_true", help = "Increase verbosity and show all stderr output of gnupg")
+parser.add_argument("signing_id", metavar = "fingerprint", type = to_fingerprint, help = "Fingerprint of the secret key that does signing.")
+parser.add_argument("signee_list", metavar = "filename", type = str, help = "List of fingerprints that should be signed.")
+args = parser.parse_args(sys.argv[1:])
+stderr = subprocess.DEVNULL if (not args.verbose) else None
+
+signer_name = args.signer_name
+if signer_name is None:
+	signer_name = pwd.getpwnam(os.environ.get("USER")).pw_gecos
+	if "," in signer_name:
+		signer_name = signer_name.split(",", maxsplit = 1)[0]
+
+signees = set()
+with open(args.signee_list) as f:
+	for line in f:
+		fingerprint = to_fingerprint(line.strip())
+		signees.add(fingerprint)
+signee_fingerprints = list(sorted(signees))
+
+# Extract all UIDs and public keys
+signees = [ ]
+Signee = collections.namedtuple("Signee", [ "fingerprint", "uids", "pubkey", "pubkey_unsigned", "signatures" ])
+email_regex = re.compile("^uid:[^r]:.*<(?P<email>[^>]+)>:")
+emails = { }
+for fingerprint in signee_fingerprints:	
+	id_output = subprocess.check_output([ "gpg", "--no-auto-check-trustdb", "--with-colons", "--list-keys", fingerprint ], stderr = stderr)	
+	id_output = id_output.decode().split("\n")
+	uids = set()
+	for line in id_output:
+		match = email_regex.match(line)
+		if match:
+			address = match.groupdict()["email"]
+			uids.add(address)
+
+	pubkey = subprocess.check_output([ "gpg", "--no-auto-check-trustdb", "--export", fingerprint ], stderr = stderr)
+	pubkey_unsigned = subprocess.check_output([ "gpg", "--no-auto-check-trustdb", "--export-options", "export-minimal", "--export", fingerprint ], stderr = stderr)
+
+	signee = Signee(fingerprint = fingerprint, uids = uids, pubkey = pubkey, pubkey_unsigned = pubkey_unsigned, signatures = { })
+	signees.append(signee)
+
+print("Cert level: %d" % (args.cert_level))
+print("Signer    : %s" % (args.signing_id))
+print("Signees   : %d" % (len(signees)))
+for signee in signees:
+	print("    * %s (%d UIDs)" % (signee.fingerprint, len(signee.uids)))
+	for uid in signee.uids:
+		print("         %s" % (uid))
+
+if not args.force:
+	yn = input("Continue (y/n)? ")
+	if yn.lower() != "y":
+		print("Aborted.")
+		sys.exit(1)
+
+
+signatures = { }
+for signee in signees:
+	try:
+		for uid in signee.uids:
+			print("Signing %s / %s" % (signee.fingerprint, uid))
+			# Delete key and import unsigned export
+			subprocess.check_call([ "gpg", "--batch", "--delete-keys", signee.fingerprint ], stdout = stderr, stderr = stderr)
+			subprocess.check_output([ "gpg", "--no-auto-check-trustdb", "--import" ], input = signee.pubkey_unsigned, stderr = stderr)
+
+			# Sign key
+			subprocess.check_call([ "gpg", "--no-auto-check-trustdb", "--local-user", args.signing_id, "--default-cert-level", str(args.cert_level), "--quick-sign-key", signee.fingerprint, uid ], stdout = stderr, stderr = stderr)
+
+			# Export signed key
+			signed_pubkey = subprocess.check_output([ "gpg", "--no-auto-check-trustdb", "--export", signee.fingerprint ], stderr = stderr)
+			signee.signatures[uid] = signed_pubkey
+			
+			if args.oneshot:
+				break
+	finally:
+		subprocess.call([ "gpg", "--no-auto-check-trustdb", "--batch", "--delete-keys", signee.fingerprint ], stdout = stderr, stderr = stderr)
+		subprocess.check_output([ "gpg", "--no-auto-check-trustdb", "--import" ], input = signee.pubkey, stderr = stderr)
+	if args.oneshot:
+		break
+
+lookup = mako.lookup.TemplateLookup([ "." ], strict_undefined = True, input_encoding = "utf-8")
+body_template = lookup.get_template("body_template.txt")
+for signee in signees:
+	for (uid, signed_pubkey) in signee.signatures.items():
+		filename = "key_%s_uid_%s_signedby_%s.gpg" % (signee.fingerprint, uid, args.signing_id)
+
+		template_args = {
+			"signer_name":	signer_name,
+			"signer_fp":	args.signing_id,
+			"signee_fp":	signee.fingerprint,
+			"signee_uid":	uid,
+		}
+		body = body_template.render(**template_args)
+
+		inner_msg = EmailMessage()
+		inner_msg["From"] = args.from_address
+		inner_msg["To"] = uid
+		inner_msg.set_content(body)	
+		inner_msg.add_attachment(signed_pubkey, maintype = "application", subtype = "pgp-keys", filename = filename)
+		inner_msg = inner_msg.as_string().encode("utf-8")
+
+		# Encrypt inner message with own FP and FP of recipient, sign with our fingerprint.
+		encrypted_inner_msg = subprocess.check_output([ "gpg", "--batch", "--no-auto-check-trustdb", "--trust-model", "always", "--local-user", args.signing_id, "--sign", "--encrypt", "--recipient", signee.fingerprint, "--recipient", args.signing_id ], input = inner_msg)
+		
+		# Then craft the outer message
+		outer_msg = MIMEMultipart(_subtype="encrypted", protocol="application/pgp-encrypted")
+		outer_msg.attach(MIMEApplication("Version: 1", _subtype = "pgp-encrypted"))
+		outer_msg.attach(MIMEApplication(encrypted_inner_msg, _subtype = "octet-stream", filename = "encrypted.gpg"))
+
+		outer_msg["From"] = args.from_address
+		outer_msg["To"] = uid
+		outer_msg["Subject"] = "Your signed pubkey %s" % (signee.fingerprint)
+		outer_msg["Date"] = email.utils.formatdate()
+		outer_msg["User-Agent"] = "bulksign -- https://github.com/johndoe31415/bulksign"
+		now = datetime.datetime.now().strftime("%a %b %d %H:%M:%S %Y")
+		with open(args.outfile, "a") as f:
+			print("From - %s" % (now), file = f)
+			print(outer_msg, file = f)

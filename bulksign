@@ -88,13 +88,17 @@ for fingerprint in signee_fingerprints:
 	signee = Signee(fingerprint = fingerprint, uids = uids, pubkey = pubkey, pubkey_unsigned = pubkey_unsigned, signatures = { })
 	signees.append(signee)
 
-print("Cert level: %d" % (args.cert_level))
-print("Signer    : %s" % (args.signing_id))
-print("Signees   : %d" % (len(signees)))
+uid_count = 0
+print("About to sign:")
 for signee in signees:
 	print("    * %s (%d UIDs)" % (signee.fingerprint, len(signee.uids)))
+	uid_count += len(signee.uids)
 	for uid in signee.uids:
 		print("         %s" % (uid))
+print()
+print("Cert level: %d" % (args.cert_level))
+print("Signer    : %s (%s <%s>)" % (args.signing_id, signer_name, args.from_address))
+print("Signees   : %d (%d UIDs)" % (len(signees), uid_count))
 
 if not args.force:
 	yn = input("Continue (y/n)? ")
